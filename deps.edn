@@ -1,0 +1,6 @@
+{:aliases
+ ;; TODO- REMOVE, just for testing
+ {:dev {:classpath-overrides {org.clojure/clojure nil}
+        :extra-deps {com.github.flow-storm/clojure {:mvn/version "1.12.0-9"}
+                     com.github.flow-storm/flow-storm-dbg {:local/root "/home/jmonetta/my-projects/flow-storm-debugger"}}
+        :jvm-opts ["-Dflowstorm.theme=dark"]}}}
