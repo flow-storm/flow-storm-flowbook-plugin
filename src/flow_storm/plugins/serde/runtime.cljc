@@ -5,7 +5,7 @@
             [flow-storm.runtime.indexes.protocols :as ip]
             [clojure.java.io :as io]
             [clojure.edn :as edn])
-  (:import [java.io File FileInputStream FileOutputStream ObjectInputStream
+  (:import [java.io Serializable File FileInputStream FileOutputStream ObjectInputStream NotSerializableException
             ObjectOutputStream OptionalDataException EOFException DataOutputStream]
            [clojure.storm Tracer]))
 
@@ -26,25 +26,25 @@
 
 (defn- make-value-filepath [file-path]
   (let [{:keys [parent name]} (file-info file-path)
-        file-name (str name ".values")]
+        file-name (str name "-values.ser")]
     {:file-path (str parent File/separator file-name)
      :file-name file-name} ))
 
 (defn- make-timeline-filepath [file-path thread-id]
   (let [{:keys [parent name]} (file-info file-path)
-        file-name (format  "%s-thread-%d.timeline" name thread-id)]
+        file-name (format  "%s-thread-%d-timeline.ser" name thread-id)]
     {:file-path (str parent File/separator file-name)
      :file-name file-name}))
 
 (defn- make-forms-file-path [file-path]
   (let [{:keys [parent name]} (file-info file-path)
-        file-name (str name ".forms")]
+        file-name (str name "-forms.ser")]
     {:file-path (str parent File/separator file-name)
      :file-name file-name}))
 
 (defn- reify-value-references [flow-id thread-ids]
   (let [timelines (mapv #(ia/get-timeline flow-id %) thread-ids)
-        *values-ids (atom (sorted-map))
+        *values-ids (atom {})
         *forms-ids (atom #{})
         val-id (fn [v]
                  (let [vids @*values-ids]
@@ -78,7 +78,7 @@
                                {}
                                timelines)]
     {:timelines-refs timelines-refs
-     :values-ids (keys @*values-ids)
+     :values (mapv first (sort-by second @*values-ids))
      :forms-ids @*forms-ids}))
 
 (comment
@@ -88,9 +88,24 @@
   )
 
 (defn serialize-values [file-path values]
-  (with-open [output-stream (ObjectOutputStream. (FileOutputStream. file-path))]
+  (with-open [output-stream (proxy [ObjectOutputStream] [(FileOutputStream. file-path)]  
+                              (replaceObject [obj]
+                                (if (and (instance? Serializable obj)
+                                         (not (fn? obj)))
+                                  obj
+                                  (let [obj-name (.getName (class obj))]
+                                    (println "Can't serialize value of type " obj-name ".")
+                                    (reify Object
+                                      Serializable
+                                      Object
+                                      (toString [_] (str "Placeholder " obj-name))))))
+                              (toString []
+                                (proxy-super enableReplaceObject true)
+                                (proxy-super toString)))]
+    (.toString output-stream)
     (doseq [v values]
-      (.write ^ObjectOutputStream output-stream (serialize-value v)))
+      (let [v-ser (if v (serialize-value v) :flow-storm/nil)]
+        (.writeObject ^ObjectOutputStream output-stream v-ser)))
     (.flush output-stream)))
 
 (comment
@@ -165,18 +180,21 @@
       (.flush out-stream))
     file-name))
 
-(defn serialize [main-file-path flow-id thread-ids]
-  (let [{value-fpath :file-path value-fname :file-name} (make-value-filepath main-file-path)
-        {:keys [timelines-refs values-ids forms-ids]} (reify-value-references flow-id thread-ids)
-        _ (serialize-values value-fpath values-ids)
-        timelines-data (serialize-timelines timelines-refs main-file-path)
-        forms-file (serialize-forms forms-ids main-file-path)
-        file-data {:values-file value-fname
-                   :timelines-data timelines-data
-                   :forms-file forms-file
-                   :total-order-timeline-file nil ;; TODO
-                   :bookmarks []}]
-    (spit main-file-path (pr-str file-data))))
+(defn serialize
+  ([main-file-path flow-id] (serialize main-file-path flow-id nil))
+  ([main-file-path flow-id thread-ids]  
+   (let [thread-ids (or thread-ids (ia/all-threads-ids flow-id))
+         {value-fpath :file-path value-fname :file-name} (make-value-filepath main-file-path)
+         {:keys [timelines-refs values forms-ids]} (reify-value-references flow-id thread-ids)
+         _ (serialize-values value-fpath values)
+         timelines-data (serialize-timelines timelines-refs main-file-path)
+         forms-file (serialize-forms forms-ids main-file-path)
+         file-data {:values-file value-fname
+                    :timelines-data timelines-data
+                    :forms-file forms-file
+                    :total-order-timeline-file nil ;; TODO
+                    :bookmarks []}]
+     (spit main-file-path (pr-str file-data)))))
 
 (defn replay-timelines [main-file-path flow-id]
   (let [{:keys [values-file timelines-data forms-file]} (edn/read-string (slurp main-file-path))
@@ -213,10 +231,11 @@
             :expr (ia/add-expr-exec-trace flow-id thread-id (:coord entry-map) (get-val (:val-id entry-map)) false))))))
   )
 
-
 (comment
-  (serialize "/home/jmonetta/my-projects/flow-storm-serde-plugin/tmp/sum-ser.edn" 0 [32])
+  (serialize "/home/jmonetta/my-projects/flow-storm-serde-plugin/tmp/sum-ser.edn" 0)
   (replay-timelines "/home/jmonetta/my-projects/flow-storm-serde-plugin/tmp/sum-ser.edn" 3)
+
+  (replay-timelines "/home/jmonetta/my-projects/flow-storm-testers/big-demo/serializations/web-ser.edn" 3)
   
   )
 (dbg-api/register-api-function :plugins.serde/serialize serialize)
