@@ -3,6 +3,8 @@
             [flow-storm.runtime.debuggers-api :as dbg-api]
             [flow-storm.runtime.types.bind-trace :as fs-bind-trace]
             [flow-storm.runtime.indexes.protocols :as ip]
+            [flow-storm.types :as types]
+            [flow-storm.runtime.values :as rt-values]
             [clojure.java.io :as io]
             [clojure.edn :as edn])
   (:import [java.io Serializable File FileInputStream FileOutputStream ObjectInputStream NotSerializableException
@@ -44,15 +46,12 @@
 
 (defn- reify-value-references [flow-id thread-ids]
   (let [timelines (mapv #(ia/get-timeline flow-id %) thread-ids)
-        *values-ids (atom {})
+        *values-ref-registry (atom (rt-values/make-empty-value-ref-registry))
         *forms-ids (atom #{})
-        val-id (fn [v]
-                 (let [vids @*values-ids]
-                   (if-let [vid (get vids v)]
-                     vid
-                     (let [new-vid (count vids)]
-                       (swap! *values-ids assoc v new-vid)
-                       new-vid))))
+        ref-value! (fn [v]
+                     (let [vrefs @*values-ref-registry]
+                       (swap! *values-ref-registry rt-values/add-val-ref v)
+                       (:vid (rt-values/get-value-ref @*values-ref-registry v))))
         timelines-refs (reduce (fn [acc timeline]
                                  (let [timeline-refs
                                        (reduce (fn [tl-refs tl-entry]
@@ -61,24 +60,24 @@
                                                    (do
                                                      (swap! *forms-ids conj (ia/get-form-id tl-entry))
                                                      (conj! tl-refs {:tl-entry tl-entry
-                                                                    :args-ids (mapv val-id (ia/get-fn-args tl-entry))
-                                                                    :bindings-vals-ids (mapv (comp val-id ia/get-bind-val) (ia/get-fn-bindings tl-entry))}))
+                                                                     :args-ids (mapv ref-value! (ia/get-fn-args tl-entry))
+                                                                     :bindings-vals-ids (mapv (comp ref-value! ia/get-bind-val) (ia/get-fn-bindings tl-entry))}))
                                                    
                                                    (or (ia/expr-trace? tl-entry)
                                                        (ia/fn-return-trace? tl-entry))                                
                                                    (conj! tl-refs {:tl-entry tl-entry
-                                                                   :val-id (val-id (ia/get-expr-val tl-entry))})
+                                                                   :val-id (ref-value! (ia/get-expr-val tl-entry))})
                                                    
                                                    (ia/fn-unwind-trace? tl-entry)
                                                    (conj! tl-refs {:tl-entry tl-entry
-                                                                   :throwable-id (val-id (ia/get-throwable tl-entry))})))
+                                                                   :throwable-id (ref-value! (ia/get-throwable tl-entry))})))
                                                (transient [])
                                                timeline)]
                                    (assoc acc timeline (persistent! timeline-refs))))            
                                {}
                                timelines)]
     {:timelines-refs timelines-refs
-     :values (mapv first (sort-by second @*values-ids))
+     :values (mapv first (sort-by (comp :vid second) (rt-values/all-val-ref-tuples @*values-ref-registry)))
      :forms-ids @*forms-ids}))
 
 (comment
