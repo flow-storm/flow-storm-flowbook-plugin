@@ -10,19 +10,26 @@
 (def target-dir "target")
 (def class-dir (str target-dir "/classes"))
 
+(def basis (delay (b/create-basis {:project "deps.edn"})))
+
 (defn clean [_]
   (b/delete {:path target-dir}))
+
+(defn compile-java [_]
+  (b/javac {:src-dirs ["java-src"]
+            :class-dir class-dir
+            :basis @basis
+            :javac-opts ["--release" "17"]}))
 
 (defn jar [_]
   (clean nil)
   (let [lib 'com.github.flow-storm/flow-storm-async-flow-plugin
-        basis (b/create-basis {:project "deps.edn"})
         jar-file (format "%s/%s.jar" target-dir (name lib))
         src-dirs ["src"]]
     (b/write-pom {:class-dir class-dir
                   :lib lib
                   :version version
-                  :basis basis
+                  :basis @basis
                   :src-dirs src-dirs
                   :pom-data [[:licenses
                               [:license

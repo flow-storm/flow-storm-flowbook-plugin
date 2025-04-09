@@ -6,17 +6,14 @@
             [flow-storm.types :as types]
             [flow-storm.runtime.values :as rt-values]
             [clojure.java.io :as io]
-            [clojure.edn :as edn])
-  (:import [java.io Serializable File FileInputStream FileOutputStream ObjectInputStream NotSerializableException
-            ObjectOutputStream OptionalDataException EOFException DataOutputStream]
+            [clojure.edn :as edn]
+            [clojure.core.protocols :refer [Datafiable]]
+            [clojure.datafy :refer [datafy]]
+            [clojure+.walk :refer [prewalk]])
+  (:import [java.io Serializable File FileInputStream FileOutputStream 
+            ObjectOutputStream ObjectInputStream OptionalDataException EOFException DataOutputStream]
+           [java.util HashMap]
            [clojure.storm Tracer]))
-
-(defprotocol SerializeP
-  (serialize-value [_]))
-
-(extend-protocol SerializeP
-  Object
-  (serialize-value [v] v))
 
 (defn- file-info [file-path]
   (let [file (io/file file-path)
@@ -75,9 +72,10 @@
                                                timeline)]
                                    (assoc acc timeline (persistent! timeline-refs))))            
                                {}
-                               timelines)]
+                               timelines)
+        values (mapv first (sort-by (comp :vid second) (rt-values/all-val-ref-tuples @*values-ref-registry)))]
     {:timelines-refs timelines-refs
-     :values (mapv first (sort-by (comp :vid second) (rt-values/all-val-ref-tuples @*values-ref-registry)))
+     :values values
      :forms-ids @*forms-ids}))
 
 (comment
@@ -86,28 +84,100 @@
  
   )
 
-(defn serialize-values [file-path values]
-  (with-open [output-stream (proxy [ObjectOutputStream] [(FileOutputStream. file-path)]  
-                              (replaceObject [obj]
-                                (if (and (instance? Serializable obj)
-                                         (not (fn? obj)))
-                                  obj
-                                  (let [obj-name (.getName (class obj))]
-                                    (println "Can't serialize value of type " obj-name ".")
-                                    (reify Object
-                                      Serializable
-                                      Object
-                                      (toString [_] (str "Placeholder " obj-name))))))
-                              (toString []
-                                (proxy-super enableReplaceObject true)
-                                (proxy-super toString)))]
-    (.toString output-stream)
-    (doseq [v values]
-      (let [v-ser (if v (serialize-value v) :flow-storm/nil)]
-        (.writeObject ^ObjectOutputStream output-stream v-ser)))
+(defn- class-name [obj]
+  (when obj
+    (.getName (class obj))))
+
+(def not-counted-limit 1000)
+
+(defn- ensure-serializable [*cache visited obj]
+  (try
+    (let [dobj (datafy obj)]
+
+      ;; for non countables we can't use the cache because hashCode could run forever
+      (if (and (seq? dobj) (not (counted? dobj)) (= not-counted-limit (bounded-count not-counted-limit dobj))) 
+
+        {:uncountable-obj/class-name (class-name dobj)
+         :uncountable-obj/head (mapv #(ensure-serializable *cache visited %) (take not-counted-limit dobj))}
+        
+        (if (.containsKey ^HashMap *cache obj)
+          (.get ^HashMap *cache obj)
+          (let [ser (prewalk (fn [o]                           
+                               (try
+                                 (when-not (visited o) ;; this is just to block cycles on the recursion we have on meta walk                   
+                                   (let [ser (when-let [datafied-v (datafy o)]                                                                                      
+                                               (if (and (instance? Serializable datafied-v)
+                                                        (not (fn? datafied-v))
+                                                        (not (class? o))
+                                                        (not (instance? clojure.lang.Namespace o))) ;; var datafy does reflection and returns a cyclic graph
+
+                                                 (let [datafied-v-ser-meta (if (meta datafied-v)
+                                                                             (vary-meta datafied-v #(ensure-serializable *cache (conj visited o) %))
+                                                                             datafied-v)]
+                                                   datafied-v-ser-meta)
+
+                                                 {:unserializable-obj/class-name (class-name o)}))]
+                                     ser))
+                                 (catch Exception e
+                                   (let [ser {:unserializable-obj/class-name (class-name o)}]
+                                     ser))))
+                             obj)]
+            (.put *cache obj ser)
+            ser))))
+    (catch Exception e
+      (let [ser {:unserializable-obj/class-name (class-name obj)}]
+        ser))))
+
+(extend-protocol Datafiable
+  clojure.lang.ArrayChunk
+  (datafy [^ArrayChunk ac]
+    (persistent!
+     (.reduce ac (fn [acc o] (conj! acc o))
+              (transient [])))))
+
+(extend-protocol Datafiable
+  java.util.LinkedList
+  (datafy [^java.util.LinkedList ll]
+    (seq ll)))
+
+(defn- serialize-values [file-path values]
+  (with-open [output-stream (ObjectOutputStream. (FileOutputStream. file-path))]
+    (let [*cache (HashMap.)]
+      (doseq [v values]
+        (let [v-data (ensure-serializable *cache #{} v)]
+          (.writeObject ^ObjectOutputStream output-stream v-data))))
     (.flush output-stream)))
 
+(defn- deserialize-objects-dbg [file-path]
+  (with-open [input-stream (ObjectInputStream. (FileInputStream. file-path))]
+    (let [values (loop [objects (transient [])]
+                   (let [o (try
+                             (.readObject ^ObjectInputStream input-stream)
+                             (catch OptionalDataException ode ::deserialize-end)
+                             (catch EOFException eof ::deserialize-end))]
+                     (if (= o ::deserialize-end)
+                       (persistent! objects)
+                       
+                       (recur (conj! objects o)))))]
+      (println "Deserialized values " (count values))      
+      values)))
+
+(defn- deserialize-objects [file-path]
+  (with-open [input-stream (ObjectInputStream. (FileInputStream. file-path))]
+    (let [values (loop [objects (transient [])]
+                   (let [o (try
+                             (.readObject ^ObjectInputStream input-stream)
+                             (catch OptionalDataException ode ::deserialize-end)
+                             (catch EOFException eof ::deserialize-end))]
+                     (if (= o ::deserialize-end)
+                       (persistent! objects)
+                       
+                       (recur (conj! objects o)))))]
+      values)))
+
 (comment
+  (serialize-values "/home/jmonetta/my-projects/flow-storm-testers/big-demo/test.ser" [1 (range) 3])
+  (deserialize-objects "/home/jmonetta/my-projects/flow-storm-testers/big-demo/test.ser")
   (def tl (ia/get-timeline 0 32))
   (ia/as-immutable (first tl))
   (ia/as-immutable (get tl 2))
@@ -157,17 +227,6 @@
                   :thread-name thread-name
                   :file file-name})))))
 
-(defn- deserialize-objects [file-path]
-  (with-open [input-stream (ObjectInputStream. (FileInputStream. file-path))]
-    (loop [objects (transient [])]
-      (if-let [o (try
-                   (.readObject ^ObjectInputStream input-stream)
-                   (catch OptionalDataException ode nil)
-                   (catch EOFException eof nil))]
-        (recur (conj! objects o))
-
-        (persistent! objects)))))
-
 (defn serialize-forms [forms-ids main-file-path]
   (let [{:keys [file-path file-name]} (make-forms-file-path main-file-path)]
     (with-open [out-stream (ObjectOutputStream. (FileOutputStream. file-path))]      
@@ -198,7 +257,8 @@
 (defn replay-timelines [main-file-path flow-id]
   (let [{:keys [values-file timelines-data forms-file]} (edn/read-string (slurp main-file-path))
         {:keys [parent]} (file-info main-file-path)
-        values (deserialize-objects (str parent File/separator values-file))
+        values (deserialize-objects-dbg (str parent File/separator values-file))
+        
         get-val (fn [val-id] (get values val-id))
         forms (deserialize-objects (str parent File/separator forms-file))]
 
