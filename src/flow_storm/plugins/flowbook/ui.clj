@@ -1,4 +1,4 @@
-(ns flow-storm.plugins.serde.ui
+(ns flow-storm.plugins.flowbook.ui
   (:require [flow-storm.debugger.ui.plugins :as fs-plugins]
             [flow-storm.debugger.ui.components :as ui]
             [flow-storm.debugger.ui.utils :as ui-utils :refer [event-handler]]
@@ -44,7 +44,7 @@
                                                                     selected-file (.showSaveDialog file-chooser (dbg-state/main-jfx-stage))
                                                                     selected-file-path (when selected-file (.getAbsolutePath selected-file))]
                                                                 (when selected-file-path
-                                                                  (runtime-api/call-by-fn-key rt-api :plugins.serde/serialize [selected-file-path #{}])))))
+                                                                  (runtime-api/call-by-fn-key rt-api :plugins.flowbook/serialize [selected-file-path #{}])))))
                                        (ui/button :label "Load flows"
                                           :on-click (fn []
                                                       (let [file-chooser (doto (FileChooser.)
@@ -53,7 +53,7 @@
                                                             selected-file (.showOpenDialog file-chooser (dbg-state/main-jfx-stage))
                                                             selected-file-path (when selected-file (.getAbsolutePath selected-file))]
                                                         (when selected-file-path
-                                                          (runtime-api/call-by-fn-key rt-api :plugins.serde/replay-timelines [selected-file-path])))))
+                                                          (runtime-api/call-by-fn-key rt-api :plugins.flowbook/replay-timelines [selected-file-path])))))
                                        (ui/button :label "Load notebook"
                                           :on-click (fn []
                                                       (let [{:keys [web-view set-html set-handlers]} (ui/web-view)]
@@ -74,11 +74,11 @@
 (defn- on-flow-clear [_ _])
 
 (fs-plugins/register-plugin
- :serde
- {:label "Serde"
-  :css-resource       "flow-storm-serde-plugin/styles.css"
-  :dark-css-resource  "flow-storm-serde-plugin/dark.css"
-  :light-css-resource "flow-storm-serde-plugin/light.css"
+ :flowbook
+ {:label "Flowbook"
+  :css-resource       "flow-storm-flowbook-plugin/styles.css"
+  :dark-css-resource  "flow-storm-flowbook-plugin/dark.css"
+  :light-css-resource "flow-storm-flowbook-plugin/light.css"
   :on-focus on-focus
   :on-create on-create
   :on-flow-clear on-flow-clear })

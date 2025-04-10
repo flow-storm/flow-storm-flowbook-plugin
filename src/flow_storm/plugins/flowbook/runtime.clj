@@ -1,4 +1,4 @@
-(ns flow-storm.plugins.serde.runtime
+(ns flow-storm.plugins.flowbook.runtime
   (:require [flow-storm.runtime.indexes.api :as ia]
             [flow-storm.runtime.debuggers-api :as dbg-api]
             [flow-storm.runtime.types.bind-trace :as fs-bind-trace]
@@ -329,5 +329,5 @@
       "1" (replay-timelines-v1 main-file-path file-data)
       (throw (ex-info "Unsupported version" file-data)))))
 
-(dbg-api/register-api-function :plugins.serde/serialize serialize)
-(dbg-api/register-api-function :plugins.serde/replay-timelines replay-timelines)
+(dbg-api/register-api-function :plugins.flowbook/serialize serialize)
+(dbg-api/register-api-function :plugins.flowbook/replay-timelines replay-timelines)
