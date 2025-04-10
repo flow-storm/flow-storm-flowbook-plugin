@@ -34,6 +34,12 @@
     {:file-path (str parent File/separator file-name)
      :file-name file-name}))
 
+(defn- make-total-order-timeline-filepath [file-path flow-id]
+  (let [{:keys [parent name]} (file-info file-path)
+        file-name (format  "%s-flow-%d-total-order-timeline.ser" name flow-id)]
+    {:file-path (str parent File/separator file-name)
+     :file-name file-name}))
+
 (defn- make-forms-file-path [file-path]
   (let [{:keys [parent name]} (file-info file-path)
         file-name (str name "-forms.ser")]
@@ -135,18 +141,6 @@
           (.writeObject ^ObjectOutputStream output-stream v-data))))
     (.flush output-stream)))
 
-(defn- deserialize-objects-dbg [file-path]
-  (with-open [input-stream (ObjectInputStream. (FileInputStream. file-path))]
-    (let [values (loop [objects (transient [])]
-                   (let [o (try
-                             (.readObject ^ObjectInputStream input-stream)
-                             (catch OptionalDataException _ ::deserialize-end)
-                             (catch EOFException _ ::deserialize-end))]
-                     (if (= o ::deserialize-end)
-                       (persistent! objects)
-
-                       (recur (conj! objects o)))))]
-      values)))
 
 (defn- deserialize-objects [file-path]
   (with-open [input-stream (ObjectInputStream. (FileInputStream. file-path))]
@@ -213,11 +207,28 @@
      :thread-name thread-name
      :file file-name}))
 
+(defn- serialize-total-order-timeline! [flow-id to-timeline main-file-path]
+  (let [{:keys [file-path file-name]} (make-total-order-timeline-filepath main-file-path flow-id)]
+    (with-open [out-stream (ObjectOutputStream. (FileOutputStream. file-path))]
+      (doseq [tot-entry to-timeline]
+        (let [entry-data {:thread-id (ia/tote-thread-id tot-entry)
+                          :idx (ia/tote-timeline-idx tot-entry)}]
+          (.writeObject out-stream entry-data)))
+      (.flush out-stream))
+    file-name))
+
 (defn- serialize-flows [flows main-file-path]
-  (reduce-kv (fn [acc [flow-id thread-id] tl-refs]
-               (assoc-in acc [flow-id thread-id] (serialize-timeline! flow-id thread-id tl-refs main-file-path)))
-   {}
-   flows))
+  (let [flows (reduce-kv (fn [acc [flow-id thread-id] tl-refs]
+                          (assoc-in acc [flow-id :thread-timelines thread-id] (serialize-timeline! flow-id thread-id tl-refs main-file-path)))
+                        {}
+                        flows)
+        flows-with-tot (reduce (fn [flows' flow-id]
+                                 (if-let [to-tl (ia/total-order-timeline flow-id)]
+                                   (assoc-in flows' [flow-id :total-order-timeline] (serialize-total-order-timeline! flow-id to-tl main-file-path))
+                                   flows'))
+                        flows
+                        (keys flows))]
+    flows-with-tot))
 
 (defn serialize-forms [forms-ids main-file-path]
   (let [{:keys [file-path file-name]} (make-forms-file-path main-file-path)]
@@ -251,50 +262,72 @@
         _ (serialize-values value-fpath values)
         flows-data (serialize-flows flows main-file-path)
         forms-file (serialize-forms forms-ids main-file-path)
-        file-data {:version "1.0"
+        file-data {:version "1"
                    :flows flows-data
                    :values-file value-fname
                    :forms-file forms-file
                    :bookmarks []}]
     (spit main-file-path (pr-str file-data))))
 
-(defn replay-timelines [main-file-path]
-  (let [{:keys [values-file flows forms-file]} (edn/read-string (slurp main-file-path))
-        {:keys [parent]} (file-info main-file-path)
-        values (deserialize-objects-dbg (str parent File/separator values-file))
+(defn replay-timelines-v1 [main-file-path {:keys [values-file flows forms-file]}]
+  (let [{:keys [parent]} (file-info main-file-path)
+        values (deserialize-objects (str parent File/separator values-file))
 
         get-val (fn [val-id] (get values val-id))
-        forms (deserialize-objects (str parent File/separator forms-file))]
+        forms (deserialize-objects (str parent File/separator forms-file))
+        replay-entry (fn [flow-id thread-id thread-name entry-map total-order?]
+                       (case (:type entry-map)
+                         :fn-call   (let [args (mapv get-val (:args-ids entry-map))
+                                          tl-idx (ia/add-fn-call-trace flow-id
+                                                                       thread-id
+                                                                       thread-name
+                                                                       (:fn-ns entry-map)
+                                                                       (:fn-name entry-map)
+                                                                       (:form-id entry-map)
+                                                                       args
+                                                                       total-order?)
+                                          fn-call (get (ia/get-timeline flow-id thread-id) tl-idx)]
+
+                                      (doseq [bmap (:bindings-vals entry-map)]
+                                        (let [b (fs-bind-trace/make-bind-trace (:symbol bmap)
+                                                                               (get-val (:val-id bmap))
+                                                                               (:coord bmap)
+                                                                               (:visible-after bmap))]
+                                          (ip/add-binding fn-call b))))
+                         :fn-return (ia/add-fn-return-trace flow-id thread-id (:coord entry-map) (get-val (:val-id entry-map)) total-order?)
+                         :fn-unwind (ia/add-fn-unwind-trace flow-id thread-id (:coord entry-map) (get-val (:throwable-id entry-map)) total-order?)
+                         :expr (ia/add-expr-exec-trace flow-id thread-id (:coord entry-map) (get-val (:val-id entry-map)) total-order?)))]
 
     (doseq [{:form/keys [id ns form file line]} forms]
       (Tracer/registerFormObject id ns file line form))
 
-    (doseq [[flow-id flow-data] flows]
-      (doseq [[thread-id {:keys [thread-name file]}] flow-data]
-        (let [tl-entries-maps (deserialize-objects (str parent File/separator file))]
-          (doseq [entry-map tl-entries-maps]
-            (case (:type entry-map)
-              :fn-call   (let [args (mapv get-val (:args-ids entry-map))
-                               tl-idx (ia/add-fn-call-trace flow-id
-                                                            thread-id
-                                                            thread-name
-                                                            (:fn-ns entry-map)
-                                                            (:fn-name entry-map)
-                                                            (:form-id entry-map)
-                                                            args
-                                                            false)
-                               fn-call (get (ia/get-timeline flow-id thread-id) tl-idx)]
+    (doseq [[flow-id {:keys [thread-timelines total-order-timeline]}] flows]
+      (if total-order-timeline
+        ;; if there is a total-order-timeline we need to load all of them on memory
+        (let [tot-entries-maps (deserialize-objects (str parent File/separator total-order-timeline))
+              {:keys [deser-timelines thread-names]}
+              (reduce-kv (fn [acc thread-id {:keys [thread-name file]}]
+                           (let [tl-entries-maps (deserialize-objects (str parent File/separator file))]
+                             (-> acc
+                                 (assoc-in [:deser-timelines thread-id] tl-entries-maps)
+                                 (assoc-in [:thread-names thread-id] thread-name))))
+                         {:deser-timelines {}
+                          :thread-names {}}
+                         thread-timelines)]
+          (doseq [{:keys [thread-id idx]} tot-entries-maps]
+            (let [entry-map (get-in deser-timelines [thread-id idx])]
+              (replay-entry flow-id thread-id (thread-names thread-id) entry-map true))))
 
-                           (doseq [bmap (:bindings-vals entry-map)]
-                             (let [b (fs-bind-trace/make-bind-trace (:symbol bmap)
-                                                                    (get-val (:val-id bmap))
-                                                                    (:coord bmap)
-                                                                    (:visible-after bmap))]
-                               (ip/add-binding fn-call b))))
-              :fn-return (ia/add-fn-return-trace flow-id thread-id (:coord entry-map) (get-val (:val-id entry-map)) false)
-              :fn-unwind (ia/add-fn-unwind-trace flow-id thread-id (:coord entry-map) (get-val (:throwable-id entry-map)) false)
-              :expr (ia/add-expr-exec-trace flow-id thread-id (:coord entry-map) (get-val (:val-id entry-map)) false))))))))
+        (doseq [[thread-id {:keys [thread-name file]}] thread-timelines]
+          (let [tl-entries-maps (deserialize-objects (str parent File/separator file))]
+            (doseq [entry-map tl-entries-maps]
+              (replay-entry flow-id thread-id thread-name entry-map false))))))))
 
+(defn replay-timelines [main-file-path]
+  (let [{:keys [version] :as file-data} (edn/read-string (slurp main-file-path))]
+    (case version
+      "1" (replay-timelines-v1 main-file-path file-data)
+      (throw (ex-info "Unsupported version" file-data)))))
 
 (dbg-api/register-api-function :plugins.serde/serialize serialize)
 (dbg-api/register-api-function :plugins.serde/replay-timelines replay-timelines)
