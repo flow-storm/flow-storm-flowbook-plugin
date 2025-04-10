@@ -44,7 +44,7 @@
                                                                     selected-file (.showSaveDialog file-chooser (dbg-state/main-jfx-stage))
                                                                     selected-file-path (when selected-file (.getAbsolutePath selected-file))]
                                                                 (when selected-file-path
-                                                                  (runtime-api/call-by-fn-key rt-api :plugins.flowbook/serialize [selected-file-path #{}])))))
+                                                                  (runtime-api/call-by-fn-key rt-api :plugins.flowbook/serialize [selected-file-path (dbg-state/all-bookmarks) #{}])))))
                                        (ui/button :label "Load flows"
                                           :on-click (fn []
                                                       (let [file-chooser (doto (FileChooser.)
