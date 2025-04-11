@@ -7,13 +7,48 @@
             [flow-storm.runtime.values :as rt-values]
             [clojure.java.io :as io]
             [clojure.edn :as edn]
-            [clojure.core.protocols :refer [Datafiable]]
-            [clojure.datafy :refer [datafy]]
-            [clojure+.walk :refer [prewalk]])
+            [clojure+.walk :refer [prewalk]]
+            [clojure.string :as str])
   (:import [java.io Serializable File FileInputStream FileOutputStream
             ObjectOutputStream ObjectInputStream OptionalDataException EOFException]
            [java.util HashMap]
            [clojure.storm Tracer]))
+
+(defprotocol Datafiable
+  :extend-via-metadata true
+
+  (datafy [o] "return a representation of o as data (default identity)"))
+
+(extend-protocol Datafiable
+  nil
+  (datafy [_] nil)
+
+  Object
+  (datafy [x] x)
+
+  clojure.lang.ArrayChunk
+  (datafy [^ArrayChunk ac]
+    (persistent!
+     (.reduce ac (fn [acc o] (conj! acc o))
+              (transient []))))
+
+  java.util.LinkedList
+  (datafy [^java.util.LinkedList ll]
+    (seq ll))
+
+  java.util.HashMap
+  (datafy [^java.util.HashMap hm]
+    (into {} hm))
+
+  )
+
+(defn datafy-it [x]
+  (let [v (datafy x)]
+    (if (identical? v x)
+      v
+      (if (instance? clojure.lang.IObj v)
+        (vary-meta v assoc ::class (-> x class .getName symbol))
+        v))))
 
 (defn- file-info [file-path]
   (let [file (io/file file-path)
@@ -84,40 +119,53 @@
 
 (def not-counted-limit 1000)
 
+(defn- clojure-data? [obj]
+  (or (char? obj)
+      (number? obj)
+      (boolean? obj)
+      (symbol? obj)
+      (string? obj)
+      (keyword? obj)
+      (and (coll? obj)
+           ;; if we are talking about collections let's make sure
+           ;; it is a clojure one and not some other object that implemented
+           ;; the interfaces
+           (-> obj class .getName (str/starts-with? "clojure")))))
+
 (defn- ensure-serializable [*unserializable-classes *cache visited obj]
   (try
-    (let [dobj (datafy obj)]
+    (let [dobj (datafy-it obj)]
 
       ;; for non countables we can't use the cache because hashCode could run forever
       (if (and (seq? dobj) (not (counted? dobj)) (= not-counted-limit (bounded-count not-counted-limit dobj)))
 
-        {:uncountable-obj/class-name (class-name dobj)
-         :uncountable-obj/head (mapv #(ensure-serializable *unserializable-classes *cache visited %) (take not-counted-limit dobj))}
+        (do
+          (swap! *unserializable-classes conj (class-name dobj))
+          {:uncountable-obj/class-name (class-name dobj)
+           :uncountable-obj/head (mapv #(ensure-serializable *unserializable-classes *cache visited %) (take not-counted-limit dobj))})
 
         (if (.containsKey ^HashMap *cache obj)
           (.get ^HashMap *cache obj)
           (let [ser (prewalk (fn [o]
-                               (let [o-class-name (class-name o)]
-                                 (try
-                                   (when-not (visited o) ;; this is just to block cycles on the recursion we have on meta walk
-                                     (let [ser (when-let [datafied-v (datafy o)]
-                                                 (if (and (instance? Serializable datafied-v)
-                                                          (not (fn? datafied-v))
-                                                          (not (class? o))
-                                                          (not (instance? clojure.lang.Namespace o))) ;; var datafy does reflection and returns a cyclic graph
+                               (try
+                                 (if (contains? visited o) ;; this is just to block cycles on the recursion we have on meta walk
+                                   ::cycle-detected
+                                   (let [ser (when-let [datafied-v (datafy-it o)]
+                                               (if (clojure-data? datafied-v)
 
-                                                   (let [datafied-v-ser-meta (if (meta datafied-v)
-                                                                               (vary-meta datafied-v #(ensure-serializable *unserializable-classes *cache (conj visited o) %))
-                                                                               datafied-v)]
-                                                     datafied-v-ser-meta)
+                                                 (let [datafied-v-ser-meta (if (meta datafied-v)
+                                                                             (vary-meta datafied-v #(ensure-serializable *unserializable-classes *cache (conj visited o) %))
+                                                                             datafied-v)]
+                                                   datafied-v-ser-meta)
 
-                                                   (do
-                                                     (swap! *unserializable-classes conj o-class-name)
-                                                     {:unserializable-obj/class-name o-class-name})))]
-                                       ser))
-                                     (catch Exception _
-                                       (swap! *unserializable-classes conj o-class-name)
-                                       {:unserializable-obj/class-name o-class-name}))))
+                                                 (let [cn (class-name datafied-v)]
+                                                   (swap! *unserializable-classes conj cn)
+                                                   {:unserializable-obj/class-name cn})))]
+                                     ser))
+                                 (catch Exception _
+                                   (let [cn (class-name o)]
+                                     (swap! *unserializable-classes conj cn)
+                                     {:unserializable-obj/class-name cn}))))
                              obj)]
             (.put *cache obj ser)
             ser))))
@@ -126,18 +174,6 @@
         (swap! *unserializable-classes conj o-class-name)
         {:unserializable-obj/class-name o-class-name}))))
 
-(extend-protocol Datafiable
-  clojure.lang.ArrayChunk
-  (datafy [^ArrayChunk ac]
-    (persistent!
-     (.reduce ac (fn [acc o] (conj! acc o))
-              (transient [])))))
-
-(extend-protocol Datafiable
-  java.util.LinkedList
-  (datafy [^java.util.LinkedList ll]
-    (seq ll)))
-
 (defn- serialize-values [*unserializable-classes file-path values]
   (with-open [output-stream (ObjectOutputStream. (FileOutputStream. file-path))]
     (let [*cache (HashMap.)]
@@ -145,7 +181,6 @@
         (let [v-data (ensure-serializable *unserializable-classes *cache #{} v)]
           (.writeObject ^ObjectOutputStream output-stream v-data))))
     (.flush output-stream)))
-
 
 (defn- deserialize-objects [file-path]
   (with-open [input-stream (ObjectInputStream. (FileInputStream. file-path))]
