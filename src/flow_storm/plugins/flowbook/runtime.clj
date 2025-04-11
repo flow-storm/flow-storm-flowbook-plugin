@@ -120,7 +120,8 @@
 (def not-counted-limit 1000)
 
 (defn- clojure-data? [obj]
-  (or (char? obj)
+  (or (nil? obj)
+      (char? obj)
       (number? obj)
       (boolean? obj)
       (symbol? obj)
@@ -155,7 +156,7 @@
                                (try
                                  (if (contains? visited o) ;; this is just to block cycles on the recursion we have on meta walk
                                    ::cycle-detected
-                                   (let [ser (when-let [datafied-v (datafy-it o)]
+                                   (let [ser (let [datafied-v (datafy-it o)]
                                                (if (clojure-data? datafied-v)
 
                                                  (let [datafied-v-ser-meta (if (meta datafied-v)
