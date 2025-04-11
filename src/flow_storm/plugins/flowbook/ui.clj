@@ -49,6 +49,15 @@
 
 (defn create-main-pane []
   (let [*loaded-flowbook-path (atom nil)
+        {clear-unser-list :clear
+         add-all-unser :add-all
+         unser-list-view-pane :list-view-pane}
+        (ui/list-view :editable? false
+                      :cell-factory (fn [list-cell txt]
+                                      (-> list-cell
+                                          (ui-utils/set-text txt)
+                                          (ui-utils/set-graphic nil)))
+                      :selection-mode :single)
         open-flowbook-btn (ui/icon-button :icon-name  "mdi-book-open-page-variant"
                                           :tooltip "Show loaded flowbook"
                                           :disable true
@@ -73,7 +82,12 @@
                                                selected-file (.showSaveDialog file-chooser (dbg-state/main-jfx-stage))
                                                selected-file-path (when selected-file (.getAbsolutePath selected-file))]
                                            (when selected-file-path
-                                             (runtime-api/call-by-fn-key rt-api :plugins.flowbook/store-flowbook [selected-file-path (dbg-state/all-bookmarks) #{}])))))
+                                             (let [{:keys [unserializable-classes]} (runtime-api/call-by-fn-key rt-api :plugins.flowbook/store-flowbook [selected-file-path (dbg-state/all-bookmarks) #{}])]
+                                               (clear-unser-list)
+                                               (add-all-unser (into ["Couldn't serialize the followig classes. They were serialized as {:unserializable-obj/class-name class-name}. "
+                                                                     "You can extend clojure.core.protocols/Datafiable for a customized datafy."
+                                                                     ""]
+                                                                    unserializable-classes)))))))
                             (ui/label :text "Use the `Load flowbook` button below to load a previously stored flowbook.")
                             (ui/button
                              :label "Load flowbook"
@@ -88,7 +102,8 @@
                                                (ui-utils/set-disable open-flowbook-btn false)
                                                (reset! *loaded-flowbook-path flowbook-path))))))
                             (ui/label :text "Once a flowbook is loaded, use the button below will open it in a new window.")
-                            open-flowbook-btn])]
+                            open-flowbook-btn
+                            unser-list-view-pane])]
       {:main-pane main-pane
        :flow-clear flow-clear}))
 

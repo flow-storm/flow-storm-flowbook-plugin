@@ -84,7 +84,7 @@
 
 (def not-counted-limit 1000)
 
-(defn- ensure-serializable [*cache visited obj]
+(defn- ensure-serializable [*unserializable-classes *cache visited obj]
   (try
     (let [dobj (datafy obj)]
 
@@ -92,35 +92,39 @@
       (if (and (seq? dobj) (not (counted? dobj)) (= not-counted-limit (bounded-count not-counted-limit dobj)))
 
         {:uncountable-obj/class-name (class-name dobj)
-         :uncountable-obj/head (mapv #(ensure-serializable *cache visited %) (take not-counted-limit dobj))}
+         :uncountable-obj/head (mapv #(ensure-serializable *unserializable-classes *cache visited %) (take not-counted-limit dobj))}
 
         (if (.containsKey ^HashMap *cache obj)
           (.get ^HashMap *cache obj)
           (let [ser (prewalk (fn [o]
-                               (try
-                                 (when-not (visited o) ;; this is just to block cycles on the recursion we have on meta walk
-                                   (let [ser (when-let [datafied-v (datafy o)]
-                                               (if (and (instance? Serializable datafied-v)
-                                                        (not (fn? datafied-v))
-                                                        (not (class? o))
-                                                        (not (instance? clojure.lang.Namespace o))) ;; var datafy does reflection and returns a cyclic graph
+                               (let [o-class-name (class-name o)]
+                                 (try
+                                   (when-not (visited o) ;; this is just to block cycles on the recursion we have on meta walk
+                                     (let [ser (when-let [datafied-v (datafy o)]
+                                                 (if (and (instance? Serializable datafied-v)
+                                                          (not (fn? datafied-v))
+                                                          (not (class? o))
+                                                          (not (instance? clojure.lang.Namespace o))) ;; var datafy does reflection and returns a cyclic graph
 
-                                                 (let [datafied-v-ser-meta (if (meta datafied-v)
-                                                                             (vary-meta datafied-v #(ensure-serializable *cache (conj visited o) %))
-                                                                             datafied-v)]
-                                                   datafied-v-ser-meta)
+                                                   (let [datafied-v-ser-meta (if (meta datafied-v)
+                                                                               (vary-meta datafied-v #(ensure-serializable *unserializable-classes *cache (conj visited o) %))
+                                                                               datafied-v)]
+                                                     datafied-v-ser-meta)
 
-                                                 {:unserializable-obj/class-name (class-name o)}))]
-                                     ser))
-                                 (catch Exception _
-                                   (let [ser {:unserializable-obj/class-name (class-name o)}]
-                                     ser))))
+                                                   (do
+                                                     (swap! *unserializable-classes conj o-class-name)
+                                                     {:unserializable-obj/class-name o-class-name})))]
+                                       ser))
+                                     (catch Exception _
+                                       (swap! *unserializable-classes conj o-class-name)
+                                       {:unserializable-obj/class-name o-class-name}))))
                              obj)]
             (.put *cache obj ser)
             ser))))
     (catch Exception _
-      (let [ser {:unserializable-obj/class-name (class-name obj)}]
-        ser))))
+      (let [o-class-name (class-name obj)]
+        (swap! *unserializable-classes conj o-class-name)
+        {:unserializable-obj/class-name o-class-name}))))
 
 (extend-protocol Datafiable
   clojure.lang.ArrayChunk
@@ -134,11 +138,11 @@
   (datafy [^java.util.LinkedList ll]
     (seq ll)))
 
-(defn- serialize-values [file-path values]
+(defn- serialize-values [*unserializable-classes file-path values]
   (with-open [output-stream (ObjectOutputStream. (FileOutputStream. file-path))]
     (let [*cache (HashMap.)]
       (doseq [v values]
-        (let [v-data (ensure-serializable *cache #{} v)]
+        (let [v-data (ensure-serializable *unserializable-classes *cache #{} v)]
           (.writeObject ^ObjectOutputStream output-stream v-data))))
     (.flush output-stream)))
 
@@ -155,15 +159,6 @@
 
                        (recur (conj! objects o)))))]
       values)))
-
-(comment
-  (serialize-values "/home/jmonetta/my-projects/flow-storm-testers/big-demo/test.ser" [1 (range) 3])
-  (deserialize-objects "/home/jmonetta/my-projects/flow-storm-testers/big-demo/test.ser")
-  (def tl (ia/get-timeline 0 32))
-  (ia/as-immutable (first tl))
-  (ia/as-immutable (get tl 2))
-
-  )
 
 (defn- serialize-timeline! [flow-id thread-id tl-refs main-file-path]
   (let [timeline (ia/get-timeline flow-id thread-id)
@@ -273,7 +268,8 @@
         {flowbook-fpath :file-path flowbook-fname :file-name} (make-flowbook-filepath main-file-path)
         {:keys [flows values forms-ids]} (reify-flows-timelines)
         _ (create-flowbook-file flowbook-fpath bookmarks)
-        _ (serialize-values value-fpath values)
+        *unserializable-classes (atom #{})
+        _ (serialize-values *unserializable-classes value-fpath values)
         flows-data (serialize-flows flows main-file-path)
         forms-file (serialize-forms forms-ids main-file-path)
         file-data {:version "1"
@@ -282,7 +278,8 @@
                    :forms-file forms-file
                    :bookmarks bookmarks
                    :flowbook-file flowbook-fname}]
-    (spit main-file-path (pr-str file-data))))
+    (spit main-file-path (pr-str file-data))
+    {:unserializable-classes @*unserializable-classes}))
 
 (defn load-flowbook-v1 [main-file-path {:keys [values-file flows forms-file bookmarks flowbook-file]}]
   (try
