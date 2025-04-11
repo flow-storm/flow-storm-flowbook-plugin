@@ -132,6 +132,11 @@
            ;; the interfaces
            (-> obj class .getName (str/starts-with? "clojure")))))
 
+(defn- add-unserializable! [*unserializable-classes obj]
+  (let [cn (class-name obj)]
+    (when-not (fn? obj) (swap! *unserializable-classes conj cn)) ;; do not report functions
+    {:unserializable-obj/class-name cn}))
+
 (defn- ensure-serializable [*unserializable-classes *cache visited obj]
   (try
     (let [dobj (datafy-it obj)]
@@ -158,21 +163,15 @@
                                                                              datafied-v)]
                                                    datafied-v-ser-meta)
 
-                                                 (let [cn (class-name datafied-v)]
-                                                   (swap! *unserializable-classes conj cn)
-                                                   {:unserializable-obj/class-name cn})))]
+                                                 (add-unserializable! *unserializable-classes datafied-v)))]
                                      ser))
                                  (catch Exception _
-                                   (let [cn (class-name o)]
-                                     (swap! *unserializable-classes conj cn)
-                                     {:unserializable-obj/class-name cn}))))
+                                   (add-unserializable! *unserializable-classes o))))
                              obj)]
             (.put *cache obj ser)
             ser))))
     (catch Exception _
-      (let [o-class-name (class-name obj)]
-        (swap! *unserializable-classes conj o-class-name)
-        {:unserializable-obj/class-name o-class-name}))))
+      (add-unserializable! *unserializable-classes obj))))
 
 (defn- serialize-values [*unserializable-classes file-path values]
   (with-open [output-stream (ObjectOutputStream. (FileOutputStream. file-path))]
