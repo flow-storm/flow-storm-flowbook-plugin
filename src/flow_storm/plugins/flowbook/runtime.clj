@@ -1,6 +1,7 @@
 (ns flow-storm.plugins.flowbook.runtime
   (:require [flow-storm.runtime.indexes.api :as ia]
             [flow-storm.runtime.debuggers-api :as dbg-api]
+            [flow-storm.plugins.flowbook.utils :as u]
             [flow-storm.runtime.types.bind-trace :as fs-bind-trace]
             [flow-storm.runtime.indexes.protocols :as ip]
             [flow-storm.runtime.events :as rt-events]
@@ -9,7 +10,7 @@
             [clojure.edn :as edn]
             [clojure+.walk :refer [prewalk]]
             [clojure.string :as str])
-  (:import [java.io Serializable File FileInputStream FileOutputStream
+  (:import [java.io File FileInputStream FileOutputStream
             ObjectOutputStream ObjectInputStream OptionalDataException EOFException]
            [java.util HashMap]
            [clojure.storm Tracer]))
@@ -132,7 +133,7 @@
       (string? obj)
       (keyword? obj)
       (and (coll? obj)
-           ;; if we are talking about collections let's make sure
+           ;; if we are looking at collections let's make sure
            ;; it is a clojure one and not some other object that implemented
            ;; the interfaces
            (-> obj class .getName (str/starts-with? "clojure")))))
@@ -168,13 +169,20 @@
                                  (if (contains? visited o) ;; this is just to block cycles on the recursion we have on meta walk
                                    ::cycle-detected
                                    (let [ser (let [datafied-v (datafy-it o)]
-                                               (if (clojure-data? datafied-v)
+                                               (cond
 
+                                                 (clojure-data? datafied-v)
                                                  (let [datafied-v-ser-meta (if (meta datafied-v)
                                                                              (vary-meta datafied-v #(ensure-serializable *unserializable-classes *cache (conj visited o) %))
                                                                              datafied-v)]
                                                    datafied-v-ser-meta)
 
+                                                 (u/primitives-array? datafied-v)
+
+                                                 {::primitive-array-type (-> datafied-v class .getComponentType .getName)
+                                                  ::primitive-array-data (into [] datafied-v)}
+
+                                                 :else
                                                  (add-unserializable! *unserializable-classes datafied-v)))]
                                      ser))
                                  (catch Exception _
