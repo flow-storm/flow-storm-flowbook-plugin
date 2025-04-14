@@ -40,6 +40,10 @@
   (datafy [^java.util.HashMap hm]
     (into {} hm))
 
+  clojure.lang.APersistentMap$KeySeq
+  (datafy [^clojure.lang.APersistentMap$KeySeq ks]
+    (map identity ks))
+
   )
 
 (defn datafy-it [x]
@@ -136,20 +140,27 @@
 (defn- add-unserializable! [*unserializable-classes obj]
   (let [cn (class-name obj)]
     (when-not (fn? obj) (swap! *unserializable-classes conj cn)) ;; do not report functions
-    {:unserializable-obj/class-name cn}))
+    {::unserializable-obj-class-name cn
+     ::unserializable-obj-id (System/identityHashCode obj)}))
 
 (defn- ensure-serializable [*unserializable-classes *cache visited obj]
   (try
     (let [dobj (datafy-it obj)]
 
-      ;; for non countables we can't use the cache because hashCode could run forever
-      (if (and (seq? dobj) (not (counted? dobj)) (= not-counted-limit (bounded-count not-counted-limit dobj)))
+      (cond
 
+        ;; for non countables we can't use the cache because hashCode could run forever
+        (and (seq? dobj) (not (counted? dobj)) (= not-counted-limit (bounded-count not-counted-limit dobj)))
         (do
           (swap! *unserializable-classes conj (class-name dobj))
-          {:uncountable-obj/class-name (class-name dobj)
-           :uncountable-obj/head (mapv #(ensure-serializable *unserializable-classes *cache visited %) (take not-counted-limit dobj))})
+          {::uncountable-obj-class-name (class-name dobj)
+           ::uncountable-obj-id (System/identityHashCode dobj)
+           ::uncountable-obj-head (mapv #(ensure-serializable *unserializable-classes *cache visited %) (take not-counted-limit dobj))})
 
+        (instance? clojure.lang.LazySeq dobj)
+        {::lazy-seq-head (mapv #(ensure-serializable *unserializable-classes *cache visited %) dobj)}
+
+        :else
         (if (.containsKey ^HashMap *cache obj)
           (.get ^HashMap *cache obj)
           (let [ser (prewalk (fn [o]

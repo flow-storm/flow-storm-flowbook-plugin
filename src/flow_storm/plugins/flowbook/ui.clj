@@ -84,7 +84,7 @@
                                            (when selected-file-path
                                              (let [{:keys [unserializable-classes]} (runtime-api/call-by-fn-key rt-api :plugins.flowbook/store-flowbook [selected-file-path (dbg-state/all-bookmarks) #{}])]
                                                (clear-unser-list)
-                                               (add-all-unser (into ["Couldn't datafy the followig classes. They were datafied automatically as {:unserializable-obj/class-name class-name}. "
+                                               (add-all-unser (into ["Couldn't datafy the followig classes. They were datafied automatically as {:flow-storm.plugins.flowbook.runtime/unserializable-obj-class-name class-name}. "
                                                                      "You can extend flow-storm.plugins.flowbook.runtime/Datafiable for a customized datafy (not the Clojure datafy one)."
                                                                      ""]
                                                                     unserializable-classes)))))))
