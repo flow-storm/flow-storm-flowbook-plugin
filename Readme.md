@@ -81,3 +81,5 @@ able to replay in any runtime, just needing FlowStorm and the Flowbook plugin as
 ## Examples
 
 There is a flowbook example [here](example-flowbooks/) if you want to try.
+If you are going to try it, it is also recommended to run with the [web plugin](https://github.com/flow-storm/flow-storm-web-plugin).
+
